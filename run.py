@@ -7,6 +7,7 @@ import requests
 import arxiv
 import xdg.BaseDirectory
 
+dry_run = False
 
 class Query(object):
     def __init__(self, query):
@@ -39,10 +40,22 @@ class Query(object):
         s += '\n' + self.abstract + '\n'
         return s.encode('utf-8')
 
+
+
+def share_categories(list1, list2):
+    """True if at least 1 category in list1 also exists in list2"""
+    return not set(list1).isdisjoint(list2)
+
+def is_recent(last_updated_time):
+    curr_time = datetime.now(timezone('GMT'))
+    delta_time = curr_time - last_updated_time
+    assert delta_time.total_seconds() > 0
+    return delta_time.days < 8
+
 class ArxivFilter(object):
     def __init__(self, categories, keywords, mailgun_sandbox_name, mailgun_api_key, mailgun_email_recipient):
         self._categories = categories
-        self._keywords = keywords
+        self._keywords = keywords       #want to rename this to queries
         self._mailgun_sandbox_name = mailgun_sandbox_name
         self._mailgun_api_key = mailgun_api_key
         self._mailgun_email_recipient = mailgun_email_recipient
@@ -58,50 +71,65 @@ class ArxivFilter(object):
         else:
             return set()
 
-    def _save_previously_sent_arxivs(self, new_queries):
+    def _save_previously_sent_arxivs(self, new_results):
         prev_arxivs = list(self._get_previously_sent_arxivs())
-        prev_arxivs += [q.id for q in new_queries]
+        prev_arxivs += [r.entry_id for r in new_results]
         prev_arxivs = list(set(prev_arxivs))
         with open(self._previous_arxivs_fname, 'w') as f:
             f.write('\n'.join(prev_arxivs))
-        
-    def _get_queries_from_last_day(self, max_results=10):
-        queries = []
 
+    def _get_results_from_last_day(self, max_results=10):
+
+        client = arxiv.Client()
+        print(self._categories)
+
+        resultslist = []
         # get all queries in the categories in the last day
-        for category in self._categories:
-            num_category_added = 0
+        for query in self._keywords:
+            print("Enter query " + query)
+            num_query_added = 0
+            outOfTime = False
             while True:
-                new_queries = [Query(q) for q in arxiv.query(search_query=category, sort_by='submittedDate', start=num_category_added, max_results=max_results)]
-                num_category_added += len(new_queries)
-                queries += [q for q in new_queries if q.is_recent]
-
-                if len(new_queries) == 0 or not new_queries[-1].is_recent:
+                search = arxiv.Search(query = query, max_results = max_results, sort_by = arxiv.SortCriterion.SubmittedDate)
+                results = client.results(search, offset=num_query_added)
+                for r in results:
+                    num_query_added += 1
+                    if(not share_categories(r.categories, self._categories)):
+                        continue
+                    if(not is_recent(r.updated)):
+                        outOfTime = True
+                        continue
+                    resultslist.append(r)
+                if outOfTime:   #hit an outdated entry
                     break
 
         # get rid of duplicates
-        queries_dict = {q.id: q for q in queries}
-        unique_keys = set(queries_dict.keys())
-        queries = [queries_dict[k] for k in unique_keys]
-
-        # only keep queries that contain keywords
-        queries = [q for q in queries if max([k in str(q).lower() for k in self._keywords])]
+        results_dict = {r.entry_id: r for r in resultslist}
+        unique_keys = set(results_dict.keys())
+        resultslist = [results_dict[k] for k in unique_keys]
 
         # sort from most recent to least
-        queries = sorted(queries, key=lambda q: (datetime.now(timezone('GMT')) - q.date).total_seconds())
+        resultslist = sorted(resultslist, key=lambda r: (datetime.now(timezone('GMT')) - r.updated).total_seconds())
 
         # filter if previously sent
         prev_arxivs = self._get_previously_sent_arxivs()
-        queries = [q for q in queries if q.id not in prev_arxivs]
-        self._save_previously_sent_arxivs(queries)
-        
-        return queries
+        resultslist = [r for r in resultslist if r.entry_id not in prev_arxivs]
+        self._save_previously_sent_arxivs(resultslist)
+
+        #for r in resultslist:
+        #    if(not share_categories(r.categories, self._categories)):
+        #        continue
+        #    print(r.title)
+        #    print(r.categories)
+        #    print("recent? {}".format(is_recent(r.updated)))
+
+        return resultslist
 
     def _send_email(self, txt):
         request = requests.post(
                 "https://api.mailgun.net/v3/{0}/messages".format(self._mailgun_sandbox_name),
                 auth=("api", self._mailgun_api_key),
-                data={"from": "arxivfilter@arxivfilter.com",
+                data={"from": "ArXiv Filter <mailgun@{0}>".format(self._mailgun_sandbox_name),
                       "to": [self._mailgun_email_recipient],
                       "subject": "ArxivFilter {0}".format(datetime.now(timezone('GMT')).ctime()),
                       "text": txt})
@@ -109,17 +137,24 @@ class ArxivFilter(object):
         print('Status: {0}'.format(request.status_code))
         print('Body:   {0}'.format(request.text))
 
+    def _to_stdout(self, txt):
+        print(txt)
+    
+    def _output(self, text):
+        if dry_run:
+            self._to_stdout(text)
+        else:
+            self._send_email(text)
+
     def run(self):
-        queries = self._get_queries_from_last_day()
-        queries_str = '\n-----------------------------\n'.join([str(q) for q in queries])
-        for keyword in self._keywords:
-            queries_str_insensitive = re.compile(re.escape(keyword), re.IGNORECASE)
-            queries_str = queries_str_insensitive.sub('**' + keyword + '**', queries_str)
-        queries_str = 'Categories: ' + ', '.join(self._categories) + '\n' + \
-                      'Keywords: ' + ', '.join(self._keywords) + '\n\n' + \
-                      '\n-----------------------------\n' + \
-                      queries_str
-        self._send_email(queries_str)
+        results = self._get_results_from_last_day()
+        results_str = "The latest arXiv Entries are here:\n\n"
+        for r in results:
+            results_str += '-----------------------------\n'
+            results_str += r.entry_id + '\n\n'
+            results_str += r.title + '\n\n'
+            results_str += r.summary + '\n\n'
+        self._output(results_str)
 
 FILE_DIR = os.path.join(xdg.BaseDirectory.xdg_config_home, 'arxiv-filter')
 
