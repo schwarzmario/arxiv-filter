@@ -5,6 +5,7 @@ from datetime import datetime
 from pytz import timezone
 import requests
 import arxiv
+import xdg.BaseDirectory
 
 
 class Query(object):
@@ -48,7 +49,7 @@ class ArxivFilter(object):
 
     @property
     def _previous_arxivs_fname(self):
-        return os.path.join(os.path.dirname(os.path.realpath(__file__)), 'previous_arxivs.txt')
+        return os.path.join(xdg.BaseDirectory.xdg_config_home, 'arxiv-filter', 'previous_arxivs.txt')
         
     def _get_previously_sent_arxivs(self):
         if os.path.exists(self._previous_arxivs_fname):
@@ -120,7 +121,7 @@ class ArxivFilter(object):
                       queries_str
         self._send_email(queries_str)
 
-FILE_DIR = os.path.dirname(os.path.realpath(__file__))
+FILE_DIR = os.path.join(xdg.BaseDirectory.xdg_config_home, 'arxiv-filter')
 
 with open(os.path.join(FILE_DIR, 'categories.txt'), 'r') as f:
     categories = [line.strip() for line in f.read().split('\n') if len(line.strip()) > 0]

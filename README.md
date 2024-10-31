@@ -32,7 +32,7 @@ Note: do not keep your mailgun sandbox or api key on github or any other publicl
 
 Run the following to install the necessary python libraries:
 ```
-$ sudo pip install datetime pytz requests arxiv
+$ sudo pip install datetime pytz requests arxiv pyxdg
 ```
 You need to use sudo because the system python installation will be used.
 
